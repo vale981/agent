@@ -8,7 +8,7 @@ NOTE: all astro-photos taken via INDIHUB-network (with auto-guiding or main imag
 
 0. You have a desire to contribute to Space exploration and sustainability projects.
 1. You have motorized astro-photography equipment connected to your home network.
-2. Your equipment is controlled by [IND-server](https://github.com/indilib/indi), manuals and docs can be found on [INDI-lib](http://indilib.org) Web-site.
+2. Your equipment is controlled by [INDI-server](https://github.com/indilib/indi), manuals and docs can be found on [INDI-lib](http://indilib.org) Web-site.
 3. INDI-server is controlled by [INDI Web Manager](https://github.com/knro/indiwebmanager).
 4. You have ready to use INDI-profile created with INDI Web Manager.
 5. Raspberry PI (or computer) where you run `indihub-agent` is connected to Internet so it can register your equipment on INDIHUB-network.
@@ -61,7 +61,7 @@ PRs and issues are highly appreciated. TODO: `indihub-agent` speaks to the INDIH
 
 ## What is next
 
-The INDIHUB-network is in its beta release at the moment. We board new host on the network, collect data to most importantly - feedback from our first hosts.
+The INDIHUB-network is in its beta release at the moment. We board new hosts on the network, collect data and most importantly - feedback from our first hosts.
 
 Also we work on partnerships. If you are interested please send us email at [info@indihub.space](mailto:info@indihub.space).
 
