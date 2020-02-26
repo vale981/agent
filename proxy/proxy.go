@@ -156,7 +156,7 @@ func (p *TcpProxy) Start(pubAddrChan chan PublicServerAddr, sessionID uint64, se
 		if isNewConn {
 			// INDI Server responses
 			wg.Add(1)
-			go func(conn net.Conn, cNum uint32, sessID uint64) {
+			go func(conn net.Conn, cNum uint32, sessID uint64, sessToken string) {
 				defer wg.Done()
 				readBuf := make([]byte, lib.INDIServerMaxRecvMsgSize)
 				for {
@@ -178,16 +178,17 @@ func (p *TcpProxy) Start(pubAddrChan chan PublicServerAddr, sessionID uint64, se
 
 					// send request to tunnel
 					resp := &indihub.Response{
-						Data:      readBuf[:n],
-						Conn:      cNum,
-						SessionID: sessID,
+						Data:         readBuf[:n],
+						Conn:         cNum,
+						SessionID:    sessID,
+						SessionToken: sessToken,
 					}
 					if err := p.Tunnel.Send(resp); err != nil {
 						log.Printf("Failed to send a response to %s tunnel: %v", p.Name, err)
 						return
 					}
 				}
-			}(c, in.Conn, sessionID)
+			}(c, in.Conn, sessionID, sessionToken)
 		}
 
 		if len(xmlCommands) == 0 {
