@@ -257,7 +257,11 @@ func main() {
 		Os:           runtime.GOOS,
 		Arch:         runtime.GOARCH,
 	}
+	ccdDrivers := []string{}
 	for i, driver := range indiDrivers {
+		if driver.Family == "CCDs" {
+			ccdDrivers = append(ccdDrivers, driver.Binary)
+		}
 		indiHubHost.Drivers[i] = &indihub.INDIDriver{
 			Binary:  driver.Binary,
 			Family:  driver.Family,
@@ -355,10 +359,10 @@ func main() {
 			log.Fatalf("Could not start agent in solo mode: %v", err)
 		}
 
-		soloProxy := solo.New(
-			"INDI-Server Solo-mode",
+		soloAgent := solo.New(
 			indiServerAddr,
 			soloClient,
+			ccdDrivers,
 		)
 
 		go func() {
@@ -373,7 +377,7 @@ func main() {
 			log.Println("Closing INDIHUB solo-session")
 
 			// close connections to local INDI-server and to INDI client
-			soloProxy.Close()
+			soloAgent.Close()
 
 			time.Sleep(1 * time.Second)
 
@@ -386,7 +390,7 @@ func main() {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			soloProxy.Start(flagSoloINDIServerAddr, regInfo.SessionID, regInfo.SessionIDPublic)
+			soloAgent.Start(regInfo.SessionID, regInfo.SessionIDPublic)
 		}()
 
 		wg.Wait()
