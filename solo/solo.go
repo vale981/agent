@@ -48,7 +48,7 @@ func New(indiServerAddr string, tunnel INDIHubSoloTunnel, ccdDrivers []string) *
 	}
 }
 
-func (p *Agent) Start(indiServerAddr string, sessionID uint64, sessionToken string) error {
+func (p *Agent) Start(sessionID uint64, sessionToken string) error {
 	// open connection to real INDI-server
 	var err error
 	p.indiConn, err = net.Dial("tcp", p.indiServerAddr)
