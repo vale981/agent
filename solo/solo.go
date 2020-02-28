@@ -2,10 +2,11 @@ package solo
 
 import (
 	"bytes"
-	"io"
+	"fmt"
 	"log"
 	"net"
-	"sync/atomic"
+
+	"github.com/clbanning/mxj"
 
 	"github.com/fatih/color"
 
@@ -14,7 +15,11 @@ import (
 )
 
 var (
+	getProperties = []byte("<getProperties version='1.7'/>")
+	enableBLOB    = "<enableBLOB device='%s'>Also</enableBLOB>"
+
 	setBLOBVector = []byte("<setBLOBVector")
+	defTextVector = []byte("<defTextVector")
 )
 
 type INDIHubSoloTunnel interface {
@@ -22,110 +27,109 @@ type INDIHubSoloTunnel interface {
 	CloseAndRecv() (*indihub.SoloSummary, error)
 }
 
-type SoloTcpProxy struct {
-	Name     string
-	Addr     string
-	listener net.Listener
-	Tunnel   INDIHubSoloTunnel
-
-	connInMap  map[uint32]net.Conn
-	connOutMap map[uint32]net.Conn
-	shouldExit int32
+type Agent struct {
+	indiServerAddr string
+	indiConn       net.Conn
+	tunnel         INDIHubSoloTunnel
+	ccdDrivers     map[string]bool
+	shouldExit     bool
 }
 
-func New(name string, addr string, tunnel INDIHubSoloTunnel) *SoloTcpProxy {
-	return &SoloTcpProxy{
-		Name:       name,
-		Addr:       addr,
-		Tunnel:     tunnel,
-		connInMap:  map[uint32]net.Conn{},
-		connOutMap: map[uint32]net.Conn{},
+func New(indiServerAddr string, tunnel INDIHubSoloTunnel, ccdDrivers []string) *Agent {
+	ccdDriversMap := make(map[string]bool)
+	for _, d := range ccdDrivers {
+		ccdDriversMap[d] = true
+	}
+
+	return &Agent{
+		indiServerAddr: indiServerAddr,
+		tunnel:         tunnel,
+		ccdDrivers:     ccdDriversMap,
 	}
 }
 
-func (p *SoloTcpProxy) Start(addr string, sessionID uint64, sessionToken string) {
-	log.Printf("Starting INDI-server for INDIHUB in solo mode on %s ...", addr)
+func (p *Agent) Start(indiServerAddr string, sessionID uint64, sessionToken string) error {
+	// open connection to real INDI-server
 	var err error
-	p.listener, err = net.Listen("tcp", addr)
+	p.indiConn, err = net.Dial("tcp", p.indiServerAddr)
 	if err != nil {
-		log.Printf("Could not start INDI-server for INDIHUB in solo mode: %v\n", err)
-		return
+		log.Printf("could not connect to INDI-server in solo-mode: %s\n", err)
+		return err
 	}
-	log.Println("...OK")
+	defer p.indiConn.Close()
 
-	var connCnt uint32
+	// set connection to receive data
+	if _, err := p.indiConn.Write(getProperties); err != nil {
+		log.Printf("could not write to INDI-server in solo-mode: %s\n", err)
+		return err
+	}
 
+	// listen INDI-server for data
+	buf := make([]byte, lib.INDIServerMaxSendMsgSize, lib.INDIServerMaxSendMsgSize)
+	xmlFlattener := lib.NewXmlFlattener()
 	for {
-		if atomic.LoadInt32(&p.shouldExit) == 1 {
+		if p.shouldExit {
 			break
 		}
 
-		// Wait for a connection from INDI-client
-		connIn, err := p.listener.Accept()
+		n, err := p.indiConn.Read(buf)
 		if err != nil {
+			log.Println("could not read from INDI-server in solo-mode:", err)
 			break
 		}
 
-		// connection to real INDI-server
-		connOut, err := net.Dial("tcp", p.Addr)
-		if err != nil {
-			log.Printf("%s - could not connect to INDI-server: %v\n", p.Name, err)
-			connIn.Close()
-			continue
-		}
+		// subscribe to BLOBs and catch images
+		xmlCommands := xmlFlattener.FeedChunk(buf[:n])
 
-		connCnt += 1
-		p.connInMap[connCnt] = connIn
-		p.connOutMap[connCnt] = connOut
-
-		// copy requests
-		go func(cNum uint32) {
-			_, err := io.Copy(connOut, connIn)
-			if err == nil {
-				// client closed connection so closing to INDI-server
-				connOut.Close()
-			} else {
-				connIn.Close()
-				connOut.Close()
-			}
-			delete(p.connInMap, cNum)
-			delete(p.connOutMap, cNum)
-		}(connCnt)
-
-		// copy responses
-		go func(cNum uint32, sessID uint64, sessToken string) {
-			buf := make([]byte, lib.INDIServerMaxSendMsgSize, lib.INDIServerMaxSendMsgSize)
-			xmlFlattener := lib.NewXmlFlattener()
-			for {
-				n, err := connOut.Read(buf)
+		for _, xmlCmd := range xmlCommands {
+			// catch images
+			if bytes.HasPrefix(xmlCmd, setBLOBVector) {
+				err := p.sendImages(xmlCmd, 1, sessionID, sessionToken)
 				if err != nil {
-					log.Printf("%s - could not read from INDI-server: %v\n", p.Name, err)
-					connIn.Close()
-					return
+					log.Println("could not send image to INDIHUB in solo-mode:", err)
 				}
+				continue
+			}
 
-				if _, err := connIn.Write(buf[:n]); err != nil {
-					log.Printf("%s - could not write to INDI-client: %v\n", p.Name, err)
-					connOut.Close()
-					return
-				}
+			// subscribe to BLOBs from CCDs
+			if !bytes.HasPrefix(xmlCmd, defTextVector) {
+				continue
+			}
 
-				// catch images
-				xmlCommands := xmlFlattener.FeedChunk(buf[:n])
-				for _, xmlComm := range xmlCommands {
-					if !bytes.HasPrefix(xmlComm, setBLOBVector) {
-						continue
-					}
-					err := p.sendImages(xmlComm, cNum, sessID, sessToken)
-					if err != nil {
-						log.Printf("%s - could not send image to INDIHUB: %v\n", p.Name, err)
+			mapVal, err := mxj.NewMapXml(xmlCmd, true)
+			if err != nil {
+				log.Println("could not parse XML chunk in solo-mode:", err)
+				continue
+			}
+			defTextVectorMap, _ := mapVal.ValueForKey("defTextVector")
+			if defTextVectorMap == nil {
+				continue
+			}
+			defTextVectorVal := defTextVectorMap.(map[string]interface{})
+
+			if nameStr, ok := defTextVectorVal["attr_name"].(string); ok && nameStr == "DRIVER_INFO" {
+				if defTextVal, ok := defTextVectorVal["defText"].([]interface{}); ok {
+					for _, driverInfo := range defTextVal {
+						driverInfoVal := driverInfo.(map[string]interface{})
+						if driverNameStr, ok := driverInfoVal["attr_name"].(string); ok && driverNameStr == "DRIVER_EXEC" {
+							if execText, ok := driverInfoVal["#text"].(string); ok && p.ccdDrivers[execText] {
+								if deviceStr, ok := defTextVectorVal["attr_device"].(string); ok {
+									_, err := p.indiConn.Write([]byte(fmt.Sprintf(enableBLOB, deviceStr)))
+									if err != nil {
+										log.Printf("could not write to INDI-server in solo-mode: %s\n", err)
+									}
+									break
+								}
+							}
+						}
 					}
 				}
 			}
-		}(connCnt, sessionID, sessionToken)
+		}
 	}
+
 	// close connections to tunnel
-	if summary, err := p.Tunnel.CloseAndRecv(); err == nil {
+	if summary, err := p.tunnel.CloseAndRecv(); err == nil {
 		gc := color.New(color.FgGreen)
 		gc.Println()
 		gc.Println("                                ************************************************************")
@@ -141,20 +145,16 @@ func (p *SoloTcpProxy) Start(addr string, sessionID uint64, sessionToken string)
 	} else {
 		log.Printf("Error getting solo-session summary: %v", err)
 	}
+
+	return nil
 }
 
-func (p *SoloTcpProxy) Close() {
-	atomic.SwapInt32(&p.shouldExit, 1)
-	for _, c := range p.connInMap {
-		c.Close()
-	}
-	p.listener.Close()
-	for _, c := range p.connOutMap {
-		c.Close()
-	}
+func (p *Agent) Close() {
+	p.indiConn.Close()
+	p.shouldExit = true
 }
 
-func (p *SoloTcpProxy) sendImages(imagesData []byte, cNum uint32, sessID uint64, sessToken string) error {
+func (p *Agent) sendImages(imagesData []byte, cNum uint32, sessID uint64, sessToken string) error {
 	resp := &indihub.Response{
 		Data:         imagesData,
 		Conn:         cNum,
@@ -162,5 +162,5 @@ func (p *SoloTcpProxy) sendImages(imagesData []byte, cNum uint32, sessID uint64,
 		SessionToken: sessToken,
 	}
 
-	return p.Tunnel.Send(resp)
+	return p.tunnel.Send(resp)
 }
