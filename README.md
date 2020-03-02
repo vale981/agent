@@ -23,12 +23,11 @@ When you first run `indihub-agent` and it is connected to INDIHUB-network succes
 
 ## indihub-agent modes
 
-There are four modes available at the moment:
+There are three modes available at the moment:
 
 1. `share` - open remote access to your equipment via INDIHUB-network of telescopes, so you can provide remote imaging sessions to your guests.
 2. `solo` - use you equipment without opening remote access but equipment is still connected to INDIHUB-network and all images taken are contributed for scientific purposes. 
-3. `broadcast` - broadcast you imaging session to observers watching it via INDI-clients, in this case without any equipment remote access and sharing (experimental).
-4. `robotic` - open remote access to your equipment to be controlled by scheduler running in INDIHUB-cloud (experimental).
+3. `robotic` - open remote access to your equipment to be controlled by scheduler running in INDIHUB-cloud (experimental).
 
 The mode is specified via `-mode` parameter, i.e. to run indihub-agent in a share-mode you will need run command:
 

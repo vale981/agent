@@ -19,7 +19,6 @@ import (
 	"google.golang.org/grpc/credentials"
 	_ "google.golang.org/grpc/encoding/gzip"
 
-	"github.com/indihub-space/agent/broadcast"
 	"github.com/indihub-space/agent/config"
 	"github.com/indihub-space/agent/hostutils"
 	"github.com/indihub-space/agent/lib"
@@ -35,26 +34,24 @@ import (
 const (
 	defaultWSPort uint64 = 2020
 
-	modeSolo      = "solo"
-	modeBroadcast = "broadcast"
-	modeShare     = "share"
-	modeRobotic   = "robotic"
+	modeSolo    = "solo"
+	modeShare   = "share"
+	modeRobotic = "robotic"
 )
 
 var (
-	flagINDIServerManagerAddr   string
-	flagPHD2ServerAddr          string
-	flagINDIProfile             string
-	flagToken                   string
-	flagConfFile                string
-	flagSoloINDIServerAddr      string
-	flagBroadcastINDIServerAddr string
-	flagCompress                bool
-	flagWSServer                bool
-	flagWSIsTLS                 bool
-	flagWSPort                  uint64
-	flagWSOrigins               string
-	flagMode                    string
+	flagINDIServerManagerAddr string
+	flagPHD2ServerAddr        string
+	flagINDIProfile           string
+	flagToken                 string
+	flagConfFile              string
+	flagSoloINDIServerAddr    string
+	flagCompress              bool
+	flagWSServer              bool
+	flagWSIsTLS               bool
+	flagWSPort                uint64
+	flagWSOrigins             string
+	flagMode                  string
 
 	indiServerAddr string
 
@@ -74,8 +71,7 @@ func init() {
 		modeSolo,
 		`indihub-agent mode (deafult value is "solo"), there four modes:\n
 solo - equipment sharing is not possible, you are connected to INDIHUB and contributing images
-sharing - you are sharing equipment with another INDIHUB user (agent will output connection info)
-broadcast - equipment sharing is not possible, you are broadcasting your experience to any number of INDIHUB users
+share - you are sharing equipment with another INDIHUB user (agent will output connection info)
 robotic - equipment sharing is not possible, your equipment is controlled by INDIHUB AI (you can still watch what it is doing!) 
 `,
 	)
@@ -90,12 +86,6 @@ robotic - equipment sharing is not possible, your equipment is controlled by IND
 		"solo-indi-server",
 		"localhost:7624",
 		"agent INDI-server address (host:port) for solo-mode",
-	)
-	flag.StringVar(
-		&flagBroadcastINDIServerAddr,
-		"broadcast-indi-server",
-		"localhost:7624",
-		"agent INDI-server address (host:port) for broadcast-mode",
 	)
 	flag.StringVar(
 		&flagPHD2ServerAddr,
@@ -150,7 +140,7 @@ robotic - equipment sharing is not possible, your equipment is controlled by IND
 func main() {
 	flag.Parse()
 
-	if flagMode != modeSolo && flagMode != modeShare && flagMode != modeBroadcast && flagMode != modeRobotic {
+	if flagMode != modeSolo && flagMode != modeShare && flagMode != modeRobotic {
 		log.Fatalf("Unknown mode '%s' provided\n", flagMode)
 	}
 
@@ -252,7 +242,7 @@ func main() {
 		SoloMode:     flagMode == modeSolo,
 		IsPHD2:       flagPHD2ServerAddr != "",
 		IsRobotic:    flagMode == modeRobotic,
-		IsBroadcast:  flagMode == modeBroadcast,
+		IsBroadcast:  false,
 		AgentVersion: version.AgentVersion,
 		Os:           runtime.GOOS,
 		Arch:         runtime.GOARCH,
@@ -533,50 +523,5 @@ func main() {
 		}
 		c.Println("                                                                                            ")
 		c.Println("                                ************************************************************")
-
-	case modeBroadcast:
-		// broadcast - broadcasting all replies from INDI-server to INDIHUB, equipment sharing is not available
-		log.Println("Starting INDIHUB agent in broadcast mode!")
-
-		broadcastClient, err := indiHubClient.BroadcastINDIServer(context.Background())
-		if err != nil {
-			log.Fatalf("Could not start agent in broadcast mode: %v", err)
-		}
-
-		broadcastProxy := broadcast.New(
-			"INDI-Server Solo-mode",
-			indiServerAddr,
-			broadcastClient,
-		)
-
-		go func() {
-			sigint := make(chan os.Signal, 1)
-			signal.Notify(sigint, os.Interrupt, os.Kill)
-
-			<-sigint
-
-			// stop WS-server
-			wsServer.Stop()
-
-			log.Println("Closing INDIHUB solo-session")
-
-			// close connections to local INDI-server and to INDI client
-			broadcastProxy.Close()
-
-			time.Sleep(1 * time.Second)
-
-			// close grpc client connection
-			conn.Close()
-		}()
-
-		// start broadcast mode INDI-server tcp-proxy
-		wg := sync.WaitGroup{}
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			broadcastProxy.Start(regInfo.SessionID, regInfo.SessionIDPublic, flagBroadcastINDIServerAddr)
-		}()
-
-		wg.Wait()
 	}
 }
