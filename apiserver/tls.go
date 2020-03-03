@@ -1,4 +1,4 @@
-package websockets
+package apiserver
 
 import (
 	"crypto/ecdsa"
