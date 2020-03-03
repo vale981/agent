@@ -6,7 +6,7 @@ import (
 	"github.com/fatih/color"
 )
 
-var AgentVersion = "1.0.2"
+var AgentVersion = "1.0.3"
 
 func CheckAgentVersion(latestVer string) {
 	log.Println("Current agent version:", AgentVersion)

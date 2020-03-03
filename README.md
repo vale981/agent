@@ -32,12 +32,15 @@ There are three modes available at the moment:
 The mode is specified via `-mode` parameter, i.e. to run indihub-agent in a share-mode you will need run command:
 
 ```bash
-./indihub-agent -indi-profile=my-profile -mode=solo
+./indihub-agent -indi-profile=my-profile -mode=share
 ```
 
 The only mandatory parameter is `-indi-profile` where you specify profile name created with [INDI Web Manager](https://github.com/knro/indiwebmanager). All other parameters have default valyes. I.e. `-mode` default value is `solo`.
 
-To get usage of all parameters just run `indihub-agent -help`.
+To get usage of all parameters just run:
+```bash
+./indihub-agent -help
+```
 
 The latest `indihub-agent` release can be downloaded from [releases](https://github.com/indihub-space/agent/releases) or [indihub.space](https://indihub.space) Web-site. 
 
@@ -45,7 +48,7 @@ The latest `indihub-agent` release can be downloaded from [releases](https://git
 
 There is an API-server running as part of `indihub-agent` and listening on port `:2020` (or on port specified via `-api-port=N` parameter) which provides two different APIs to control or use `indihub-agent`:
 
-- RESTful API to get status or switch modes of the the agent
+- RESTful API to get status or switch modes of the agent
 - Websocket API to control equipment via websocket-connections
 
 By default API-server works over HTTP-protocol. You can switch it to work over TLS by providing `-api-tls` parameter. This will make `indihub-agent` to generate self-signed CA and certificate.
@@ -83,13 +86,15 @@ Response example:
 
 #### 2. Restart indihub-agent current mode (public)
 
-`curl -X GET "http://raspberrypi.local:2020/status"` 
+`curl -X GET "http://raspberrypi.local:2020/restart"` 
 
 #### 3. Switch indihub-agent mode (protected via token)
 
 You need to do HTTP-request `POST "http://indihub-agent-host:2020/mode/{mode}"` specifying required mode in a `mode` URI-parameter and supplying your token in `Authorization` header, i.e.:
 
-`curl -X POST "http://raspberrypi.local:2020/mode/solo" -H "Authorization: Bearer cca13ac2951efd6d912ead20a7ab4882"`
+```bash
+curl -X POST "http://raspberrypi.local:2020/mode/share" -H "Authorization: Bearer cca13ac2951efd6d912ead20a7ab4882"
+```
 
 Response will have status of agent running in new mode:
 
@@ -125,7 +130,7 @@ NOTE: Websocket upgrade-requests are allowed only from origins specified with co
 
 #### 1. Open WS-connection to INDI-server (protected via token)
 
-To establish new WS-connection to INDI-server you will need to use URL with format: 
+To establish a new WS-connection to INDI-server you will need to use URL with format: 
 
 `ws://raspberrypi.local:2020/websocket/indiserver?token=cca13ac2951efd6d912ead20a7ab4882`
 
