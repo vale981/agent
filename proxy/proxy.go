@@ -30,8 +30,8 @@ type TcpProxy struct {
 }
 
 type PublicServerAddr struct {
-	Name string
-	Addr string
+	Name string `json:"name"`
+	Addr string `json:"addr"`
 }
 
 func New(name string, addr string, tunnel INDIHubTunnel, filter *hostutils.INDIFilter) *TcpProxy {

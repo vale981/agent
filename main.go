@@ -11,32 +11,25 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
-	"sync"
-	"time"
 
-	"github.com/fatih/color"
+	"github.com/indihub-space/agent/apiserver"
+
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	_ "google.golang.org/grpc/encoding/gzip"
 
 	"github.com/indihub-space/agent/config"
-	"github.com/indihub-space/agent/hostutils"
 	"github.com/indihub-space/agent/lib"
 	"github.com/indihub-space/agent/logutil"
 	"github.com/indihub-space/agent/manager"
 	"github.com/indihub-space/agent/proto/indihub"
-	"github.com/indihub-space/agent/proxy"
+	"github.com/indihub-space/agent/share"
 	"github.com/indihub-space/agent/solo"
 	"github.com/indihub-space/agent/version"
-	"github.com/indihub-space/agent/websockets"
 )
 
 const (
-	defaultWSPort uint64 = 2020
-
-	modeSolo    = "solo"
-	modeShare   = "share"
-	modeRobotic = "robotic"
+	defaultAPIPort uint64 = 2020
 )
 
 var (
@@ -47,10 +40,9 @@ var (
 	flagConfFile              string
 	flagSoloINDIServerAddr    string
 	flagCompress              bool
-	flagWSServer              bool
-	flagWSIsTLS               bool
-	flagWSPort                uint64
-	flagWSOrigins             string
+	flagAPITLS                bool
+	flagAPIPort               uint64
+	flagAPIOrigins            string
 	flagMode                  string
 
 	indiServerAddr string
@@ -68,7 +60,7 @@ func init() {
 	flag.StringVar(
 		&flagMode,
 		"mode",
-		modeSolo,
+		lib.ModeSolo,
 		`indihub-agent mode (deafult value is "solo"), there four modes:\n
 solo - equipment sharing is not possible, you are connected to INDIHUB and contributing images
 share - you are sharing equipment with another INDIHUB user (agent will output connection info)
@@ -112,35 +104,29 @@ robotic - equipment sharing is not possible, your equipment is controlled by IND
 		"Name of INDI-profile to share via indihub",
 	)
 	flag.BoolVar(
-		&flagWSServer,
-		"ws-server",
-		true,
-		"launch Websocket server to control equipment via Websocket API",
-	)
-	flag.BoolVar(
-		&flagWSIsTLS,
-		"ws-tls",
+		&flagAPITLS,
+		"api-tls",
 		false,
-		"serve web-socket over TLS with self-signed certificate",
+		"serve API-server over TLS with self-signed certificate",
 	)
 	flag.Uint64Var(
-		&flagWSPort,
-		"ws-port",
-		defaultWSPort,
-		"port to start web socket-server on",
+		&flagAPIPort,
+		"api-port",
+		defaultAPIPort,
+		"port to start API-server on",
 	)
 	flag.StringVar(
-		&flagWSOrigins,
-		"ws-origins",
+		&flagAPIOrigins,
+		"api-origins",
 		"",
-		"comma-separated list of origins allowed to connect to WS-server",
+		"comma-separated list of origins allowed to connect to API-server",
 	)
 }
 
 func main() {
 	flag.Parse()
 
-	if flagMode != modeSolo && flagMode != modeShare && flagMode != modeRobotic {
+	if flagMode != lib.ModeSolo && flagMode != lib.ModeShare && flagMode != lib.ModeRobotic {
 		log.Fatalf("Unknown mode '%s' provided\n", flagMode)
 	}
 
@@ -239,9 +225,9 @@ func main() {
 			Autoconnect: indiProfile.AutoConnect,
 		},
 		Drivers:      make([]*indihub.INDIDriver, len(indiDrivers)),
-		SoloMode:     flagMode == modeSolo,
+		SoloMode:     flagMode == lib.ModeSolo,
 		IsPHD2:       flagPHD2ServerAddr != "",
-		IsRobotic:    flagMode == modeRobotic,
+		IsRobotic:    flagMode == lib.ModeRobotic,
 		IsBroadcast:  false,
 		AgentVersion: version.AgentVersion,
 		Os:           runtime.GOOS,
@@ -287,6 +273,8 @@ func main() {
 		log.Fatal(err)
 	}
 	log.Println("...OK")
+	// close grpc client connection at the very end
+	defer conn.Close()
 
 	indiHubClient := indihub.NewINDIHubClient(conn)
 
@@ -296,21 +284,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	log.Println("Current agent version:", version.AgentVersion)
-	log.Println("Latest agent version:", regInfo.AgentVersion)
-
-	if version.AgentVersion < regInfo.AgentVersion {
-		yc := color.New(color.FgYellow)
-		yc.Println()
-		yc.Println("                                ************************************************************")
-		yc.Println("                                *          WARNING: you version of agent is outdated!      *")
-		yc.Println("                                *                                                          *")
-		yc.Println("                                *          Please download the latest version from:        *")
-		yc.Println("                                *          https://indihub.space/downloads                 *")
-		yc.Println("                                *                                                          *")
-		yc.Println("                                ************************************************************")
-		yc.Println("                                                                                            ")
-	}
+	version.CheckAgentVersion(regInfo.AgentVersion)
 
 	log.Printf("Access token: %s\n", regInfo.Token)
 	log.Printf("Host session token: %s\n", regInfo.SessionIDPublic)
@@ -325,203 +299,40 @@ func main() {
 		}
 	}
 
-	// start WS-server
-	wsServer := websockets.NewWsServer(
+	// prepare all modes
+	soloMode := solo.NewMode(indiHubClient, regInfo, indiServerAddr, ccdDrivers)
+	shareMode := share.NewMode(indiHubClient, regInfo, indiServerAddr, flagPHD2ServerAddr, lib.ModeShare)
+	roboticMode := share.NewMode(indiHubClient, regInfo, indiServerAddr, flagPHD2ServerAddr, lib.ModeRobotic)
+
+	// start API-server
+	apiServer := apiserver.NewAPIServer(
 		regInfo.Token,
 		indiServerAddr,
 		flagPHD2ServerAddr,
-		flagWSPort,
-		flagWSIsTLS,
-		flagWSOrigins,
+		flagAPIPort,
+		flagAPITLS,
+		flagAPIOrigins,
+		flagMode,
+		flagINDIProfile,
+		map[string]apiserver.AgentMode{
+			lib.ModeSolo:    soloMode,
+			lib.ModeShare:   shareMode,
+			lib.ModeRobotic: roboticMode,
+		},
 	)
-	go wsServer.Start()
 
-	// start session
-	switch flagMode {
+	go func() {
+		sigint := make(chan os.Signal, 1)
+		signal.Notify(sigint, os.Interrupt, os.Kill)
 
-	case modeSolo:
-		// solo mode - equipment sharing is not available but host still sends all images to INDIHUB
-		log.Println("'solo' parameter was provided. Your session is in solo-mode: equipment sharing is not available")
-		log.Println("Starting INDIHUB agent in solo mode!")
+		<-sigint
 
-		soloClient, err := indiHubClient.SoloMode(context.Background())
-		if err != nil {
-			log.Fatalf("Could not start agent in solo mode: %v", err)
-		}
+		log.Println("Stopping API-server gracefully")
 
-		soloAgent := solo.New(
-			indiServerAddr,
-			soloClient,
-			ccdDrivers,
-		)
+		// close connections to local INDI-server
+		apiServer.Stop()
+	}()
 
-		go func() {
-			sigint := make(chan os.Signal, 1)
-			signal.Notify(sigint, os.Interrupt, os.Kill)
-
-			<-sigint
-
-			// stop WS-server
-			wsServer.Stop()
-
-			log.Println("Closing INDIHUB solo-session")
-
-			// close connections to local INDI-server and to INDI client
-			soloAgent.Close()
-
-			time.Sleep(1 * time.Second)
-
-			// close grpc client connection
-			conn.Close()
-		}()
-
-		// start solo mode INDI-server tcp-proxy
-		wg := sync.WaitGroup{}
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			soloAgent.Start(regInfo.SessionID, regInfo.SessionIDPublic)
-		}()
-
-		wg.Wait()
-
-	case modeShare, modeRobotic:
-		// main equipment sharing mode
-		if flagMode == modeRobotic {
-			log.Println("'robotic' parameter was provided. Your session is in robotic-mode: equipment sharing is not available")
-		}
-		// open INDI server tunnel
-		log.Println("Starting INDI-Server in the cloud...")
-		indiServTunnel, err := indiHubClient.INDIServer(
-			context.Background(),
-		)
-		if err != nil {
-			log.Fatal(err)
-		}
-		log.Println("...OK")
-
-		indiFilterConf := &hostutils.INDIFilterConfig{} // TODO: add reading config
-		indiFilter := hostutils.NewINDIFilter(indiFilterConf)
-		indiServerProxy := proxy.New("INDI-Server", indiServerAddr, indiServTunnel, indiFilter)
-
-		// start PHD2 server proxy if specified
-		var phd2ServerProxy *proxy.TcpProxy
-		if flagPHD2ServerAddr != "" {
-			// open PHD2 server tunnel
-			log.Println("Starting PHD2-Server in the cloud...")
-			phd2ServTunnel, err := indiHubClient.PHD2Server(
-				context.Background(),
-			)
-			if err != nil {
-				log.Fatal(err)
-			}
-			log.Println("...OK")
-			phd2ServerProxy = proxy.New("PHD2-Server", flagPHD2ServerAddr, phd2ServTunnel, nil)
-		}
-
-		go func() {
-			sigint := make(chan os.Signal, 1)
-			signal.Notify(sigint, os.Interrupt, os.Kill)
-
-			<-sigint
-
-			// stop WS-server
-			wsServer.Stop()
-
-			// close connections to tunnels
-			indiServTunnel.CloseSend()
-			if phd2ServerProxy != nil {
-				phd2ServerProxy.Tunnel.CloseSend()
-			}
-
-			// close grpc client connection
-			conn.Close()
-
-			// close connections to local INDI-server and PHD2-Server
-			indiServerProxy.Close()
-			if phd2ServerProxy != nil {
-				phd2ServerProxy.Close()
-			}
-		}()
-
-		serverAddrChan := make(chan proxy.PublicServerAddr, 3)
-
-		wg := sync.WaitGroup{}
-
-		// INDI Server Proxy start
-		waitNum := 1
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			indiServerProxy.Start(serverAddrChan, regInfo.SessionID, regInfo.SessionIDPublic)
-		}()
-
-		if flagPHD2ServerAddr != "" {
-			waitNum = 2
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				phd2ServerProxy.Start(serverAddrChan, regInfo.SessionID, regInfo.SessionIDPublic)
-			}()
-		}
-
-		addrData := []proxy.PublicServerAddr{}
-		for i := 0; i < waitNum; i++ {
-			sAddr := <-serverAddrChan
-			addrData = append(addrData, sAddr)
-		}
-
-		c := color.New(color.FgCyan)
-		gc := color.New(color.FgGreen)
-		yc := color.New(color.FgYellow)
-		rc := color.New(color.FgMagenta)
-		if flagMode != modeRobotic {
-			c.Println()
-			c.Println("                                ************************************************************")
-			c.Println("                                *               INDIHUB public address list!!              *")
-			c.Println("                                ************************************************************")
-			c.Println("                                                                                            ")
-			for _, sAddr := range addrData {
-				gc.Printf("                                   %s: %s\n", sAddr.Name, sAddr.Addr)
-			}
-			c.Println("                                                                                            ")
-			c.Println("                                ************************************************************")
-			c.Println()
-			c.Println("                                Please provide your guest with this information:")
-			c.Println()
-			c.Println("                                1. Public address list from the above")
-			c.Println("                                2. Focal length and aperture of your main telescope")
-			c.Println("                                3. Focal length and aperture of your guiding telescope")
-			c.Println("                                4. Type of guiding you use: PHD2 or guiding via camera")
-			c.Println("                                5. Names of your imaging camera and guiding cameras")
-			c.Println()
-			yc.Println("                                NOTE: These public addresses will be available ONLY until")
-			yc.Println("                                agent is running! (Ctrl+C will stop the session)")
-			c.Println()
-		} else {
-			c.Println()
-			c.Println("                                ************************************************************")
-			c.Println("                                *               INDIHUB robotic-session started!!          *")
-			c.Println("                                ************************************************************")
-			c.Println("                                                                                            ")
-		}
-
-		wg.Wait()
-
-		c.Println()
-		c.Println("                                ************************************************************")
-		c.Println("                                *               INDIHUB session finished!!                 *")
-		c.Println("                                ************************************************************")
-		c.Println("                                                                                            ")
-		if flagMode != modeRobotic {
-			for _, sAddr := range addrData {
-				rc.Printf("                                   %s: %s - CLOSED!!\n", sAddr.Name, sAddr.Addr)
-			}
-		} else {
-			c.Println("                                *         INDIHUB robotic-session finished.                 *")
-			c.Println("                                *         Thank you for your contribution!                  *")
-		}
-		c.Println("                                                                                            ")
-		c.Println("                                ************************************************************")
-	}
+	// start API-server and indihub-agent in the current mode
+	apiServer.Start()
 }
