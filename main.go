@@ -38,7 +38,6 @@ var (
 	flagINDIProfile           string
 	flagToken                 string
 	flagConfFile              string
-	flagSoloINDIServerAddr    string
 	flagCompress              bool
 	flagAPITLS                bool
 	flagAPIPort               uint64
@@ -72,12 +71,6 @@ robotic - equipment sharing is not possible, your equipment is controlled by IND
 		"compress",
 		true,
 		"Enable gzip-compression",
-	)
-	flag.StringVar(
-		&flagSoloINDIServerAddr,
-		"solo-indi-server",
-		"localhost:7624",
-		"agent INDI-server address (host:port) for solo-mode",
 	)
 	flag.StringVar(
 		&flagPHD2ServerAddr,
@@ -323,11 +316,10 @@ func main() {
 
 	go func() {
 		sigint := make(chan os.Signal, 1)
-		signal.Notify(sigint, os.Interrupt, os.Kill)
+		signal.Notify(sigint, os.Interrupt)
 
-		<-sigint
-
-		log.Println("Stopping API-server gracefully")
+		sig := <-sigint
+		log.Println("Stopping API-server gracefully. OS signal received:", sig)
 
 		// close connections to local INDI-server
 		apiServer.Stop()
