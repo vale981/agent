@@ -12,12 +12,11 @@ import (
 	"os/signal"
 	"runtime"
 
-	"github.com/indihub-space/agent/apiserver"
-
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	_ "google.golang.org/grpc/encoding/gzip"
 
+	"github.com/indihub-space/agent/apiserver"
 	"github.com/indihub-space/agent/config"
 	"github.com/indihub-space/agent/lib"
 	"github.com/indihub-space/agent/logutil"
@@ -50,6 +49,9 @@ var (
 )
 
 func init() {
+	// restrict  number of system-threads to number of cores
+	runtime.GOMAXPROCS(runtime.NumCPU())
+
 	flag.StringVar(
 		&flagINDIServerManagerAddr,
 		"indi-server-manager",
