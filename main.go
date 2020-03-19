@@ -34,6 +34,7 @@ const (
 var (
 	flagINDIServerManagerAddr string
 	flagPHD2ServerAddr        string
+	flagINDIServerAddr        string
 	flagINDIProfile           string
 	flagToken                 string
 	flagConfFile              string
@@ -57,6 +58,12 @@ func init() {
 		"indi-server-manager",
 		"raspberrypi.local:8624",
 		"INDI-server Manager address (host:port)",
+	)
+	flag.StringVar(
+		&flagINDIServerAddr,
+		"indi-server",
+		"",
+		"INDI-server address (host:port) to connect without Web Manager",
 	)
 	flag.StringVar(
 		&flagMode,
@@ -130,17 +137,65 @@ func main() {
 		indiHubAddr = "localhost:7667" // TODO: change this to optional DEV server
 	}
 
-	if flagINDIServerManagerAddr == "" {
-		log.Fatal("'indi-server-manager' parameter is missing, the 'host:port' format is expected")
-	}
+	indiServerAddr := ""
+	indiDrivers := []*lib.INDIDriver{}
+	indiProfile := &lib.INDIProfile{}
+	if flagINDIServerAddr != "" {
+		// connect to INDI-server directly without Web Manager
+		if _, _, err := net.SplitHostPort(flagINDIServerAddr); err != nil {
+			log.Fatal("Bad syntax for 'indi-server' parameter, the 'host:port' format is expected")
+		}
+		log.Println("Will try to connect directly to INDI-server (Web Manager is not used)")
+		indiProfile.Name = flagINDIServerAddr // to let backend know that no Web Manager was used
+		indiServerAddr = flagINDIServerAddr
+	} else {
+		// connect to INDI-server using info from Web Manager
+		indiHost, _, err := net.SplitHostPort(flagINDIServerManagerAddr)
+		if err != nil {
+			log.Fatal("Bad syntax for 'indi-server-manager' parameter, the 'host:port' format is expected")
+		}
+		if flagINDIProfile == "" {
+			log.Fatal("'indi-profile' parameter is required")
+		}
 
-	indiHost, _, err := net.SplitHostPort(flagINDIServerManagerAddr)
-	if err != nil {
-		log.Fatal("Bad syntax for 'indi-server-manager' parameter, the 'host:port' format is expected")
-	}
+		// connect to INDI-server Manager
+		log.Printf("Connection to local INDI-Server Manager on %s...\n", flagINDIServerManagerAddr)
+		managerClient := manager.NewClient(flagINDIServerManagerAddr)
+		running, currINDIProfile, err := managerClient.GetStatus()
+		if err != nil {
+			log.Fatal(err)
+		}
+		log.Println("...OK")
 
-	if flagINDIProfile == "" {
-		log.Fatal("'indi-profile' parameter is required")
+		// start required profile if it is not active and running
+		if !running || currINDIProfile != flagINDIProfile {
+			log.Printf("Setting active INDI-profile to '%s'\n", flagINDIProfile)
+			if err := managerClient.StopServer(); err != nil {
+				log.Fatal(err)
+			}
+			if err := managerClient.StartProfile(flagINDIProfile); err != nil {
+				log.Fatal(err)
+			}
+		} else {
+			log.Printf("INDI-server is running with active INDI-profile '%s'\n", flagINDIProfile)
+		}
+
+		// get profile connect data
+		indiProfile, err = managerClient.GetProfile(flagINDIProfile)
+		if err != nil {
+			log.Fatalf("could not get INDI-profile from INDI-server manager: %s", err)
+		}
+		indiServerAddr = fmt.Sprintf("%s:%d", indiHost, indiProfile.Port)
+
+		// get profile drivers data
+		indiDrivers, err = managerClient.GetDrivers()
+		if err != nil {
+			log.Fatalf("could not get INDI-drivers info from INDI-server manager: %s", err)
+		}
+		log.Println("INDIDrivers:")
+		for _, d := range indiDrivers {
+			log.Printf("%+v", *d)
+		}
 	}
 
 	// read token from flag or from config file if exists
@@ -149,45 +204,6 @@ func main() {
 		if err == nil {
 			flagToken = conf.Token
 		}
-	}
-
-	// connect to INDI-server Manager
-	log.Printf("Connection to local INDI-Server Manager on %s...\n", flagINDIServerManagerAddr)
-	managerClient := manager.NewClient(flagINDIServerManagerAddr)
-	running, currINDIProfile, err := managerClient.GetStatus()
-	if err != nil {
-		log.Fatal(err)
-	}
-	log.Println("...OK")
-
-	// start required profile if it is not active and running
-	if !running || currINDIProfile != flagINDIProfile {
-		log.Printf("Setting active INDI-profile to '%s'\n", flagINDIProfile)
-		if err := managerClient.StopServer(); err != nil {
-			log.Fatal(err)
-		}
-		if err := managerClient.StartProfile(flagINDIProfile); err != nil {
-			log.Fatal(err)
-		}
-	} else {
-		log.Printf("INDI-server is running with active INDI-profile '%s'\n", flagINDIProfile)
-	}
-
-	// get profile connect data
-	indiProfile, err := managerClient.GetProfile(flagINDIProfile)
-	if err != nil {
-		log.Fatalf("could not get INDI-profile from INDI-server manager: %s", err)
-	}
-	indiServerAddr = fmt.Sprintf("%s:%d", indiHost, indiProfile.Port)
-
-	// get profile drivers data
-	indiDrivers, err := managerClient.GetDrivers()
-	if err != nil {
-		log.Fatalf("could not get INDI-drivers info from INDI-server manager: %s", err)
-	}
-	log.Println("INDIDrivers:")
-	for _, d := range indiDrivers {
-		log.Printf("%+v", *d)
 	}
 
 	// test connect to local INDI-server
@@ -228,11 +244,7 @@ func main() {
 		Os:           runtime.GOOS,
 		Arch:         runtime.GOARCH,
 	}
-	ccdDrivers := []string{}
 	for i, driver := range indiDrivers {
-		if driver.Family == "CCDs" {
-			ccdDrivers = append(ccdDrivers, driver.Binary)
-		}
 		indiHubHost.Drivers[i] = &indihub.INDIDriver{
 			Binary:  driver.Binary,
 			Family:  driver.Family,
@@ -295,7 +307,7 @@ func main() {
 	}
 
 	// prepare all modes
-	soloMode := solo.NewMode(indiHubClient, regInfo, indiServerAddr, ccdDrivers)
+	soloMode := solo.NewMode(indiHubClient, regInfo, indiServerAddr)
 	shareMode := share.NewMode(indiHubClient, regInfo, indiServerAddr, flagPHD2ServerAddr, lib.ModeShare)
 	roboticMode := share.NewMode(indiHubClient, regInfo, indiServerAddr, flagPHD2ServerAddr, lib.ModeRobotic)
 

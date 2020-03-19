@@ -11,18 +11,16 @@ type Mode struct {
 	indiServerAddr string
 	indiHubClient  indihub.INDIHubClient
 	regInfo        *indihub.RegisterInfo
-	ccdDrivers     []string
 
 	stopCh chan struct{}
 	status string
 }
 
-func NewMode(indiHubClient indihub.INDIHubClient, regInfo *indihub.RegisterInfo, indiServerAddr string, ccdDrivers []string) *Mode {
+func NewMode(indiHubClient indihub.INDIHubClient, regInfo *indihub.RegisterInfo, indiServerAddr string) *Mode {
 	return &Mode{
 		indiServerAddr: indiServerAddr,
 		indiHubClient:  indiHubClient,
 		regInfo:        regInfo,
-		ccdDrivers:     ccdDrivers,
 		stopCh:         make(chan struct{}, 1),
 	}
 }
@@ -40,7 +38,6 @@ func (s *Mode) Start() {
 	soloAgent := New(
 		s.indiServerAddr,
 		soloClient,
-		s.ccdDrivers,
 	)
 
 	go func() {
