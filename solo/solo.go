@@ -18,8 +18,8 @@ var (
 	getProperties = []byte("<getProperties version='1.7'/>")
 	enableBLOB    = "<enableBLOB device='%s'>Also</enableBLOB>"
 
-	setBLOBVector = []byte("<setBLOBVector")
-	defTextVector = []byte("<defTextVector")
+	setBLOBVector   = []byte("<setBLOBVector")
+	defNumberVector = []byte("<defNumberVector")
 )
 
 type INDIHubSoloTunnel interface {
@@ -31,20 +31,13 @@ type Agent struct {
 	indiServerAddr string
 	indiConn       net.Conn
 	tunnel         INDIHubSoloTunnel
-	ccdDrivers     map[string]bool
 	shouldExit     bool
 }
 
-func New(indiServerAddr string, tunnel INDIHubSoloTunnel, ccdDrivers []string) *Agent {
-	ccdDriversMap := make(map[string]bool)
-	for _, d := range ccdDrivers {
-		ccdDriversMap[d] = true
-	}
-
+func New(indiServerAddr string, tunnel INDIHubSoloTunnel) *Agent {
 	return &Agent{
 		indiServerAddr: indiServerAddr,
 		tunnel:         tunnel,
-		ccdDrivers:     ccdDriversMap,
 	}
 }
 
@@ -67,6 +60,7 @@ func (p *Agent) Start(sessionID uint64, sessionToken string) error {
 	// listen INDI-server for data
 	buf := make([]byte, lib.INDIServerMaxSendMsgSize, lib.INDIServerMaxSendMsgSize)
 	xmlFlattener := lib.NewXmlFlattener()
+	subscribedCCDs := map[string]bool{}
 	for {
 		if p.shouldExit {
 			break
@@ -91,8 +85,8 @@ func (p *Agent) Start(sessionID uint64, sessionToken string) error {
 				continue
 			}
 
-			// subscribe to BLOBs from CCDs
-			if !bytes.HasPrefix(xmlCmd, defTextVector) {
+			// subscribe to BLOBs from CCDs by catching defNumberVector property with name="CCD_EXPOSURE"
+			if !bytes.HasPrefix(xmlCmd, defNumberVector) {
 				continue
 			}
 
@@ -101,28 +95,20 @@ func (p *Agent) Start(sessionID uint64, sessionToken string) error {
 				log.Println("could not parse XML chunk in solo-mode:", err)
 				continue
 			}
-			defTextVectorMap, _ := mapVal.ValueForKey("defTextVector")
-			if defTextVectorMap == nil {
+			defNumberVectorMap, _ := mapVal.ValueForKey("defNumberVector")
+			if defNumberVectorMap == nil {
 				continue
 			}
-			defTextVectorVal := defTextVectorMap.(map[string]interface{})
+			defNumberVectorVal := defNumberVectorMap.(map[string]interface{})
 
-			if nameStr, ok := defTextVectorVal["attr_name"].(string); ok && nameStr == "DRIVER_INFO" {
-				if defTextVal, ok := defTextVectorVal["defText"].([]interface{}); ok {
-					for _, driverInfo := range defTextVal {
-						driverInfoVal := driverInfo.(map[string]interface{})
-						if driverNameStr, ok := driverInfoVal["attr_name"].(string); ok && driverNameStr == "DRIVER_EXEC" {
-							if execText, ok := driverInfoVal["#text"].(string); ok && p.ccdDrivers[execText] {
-								if deviceStr, ok := defTextVectorVal["attr_device"].(string); ok {
-									_, err := p.indiConn.Write([]byte(fmt.Sprintf(enableBLOB, deviceStr)))
-									if err != nil {
-										log.Printf("could not write to INDI-server in solo-mode: %s\n", err)
-									}
-									break
-								}
-							}
-						}
+			if nameStr, ok := defNumberVectorVal["attr_name"].(string); ok && nameStr == "CCD_EXPOSURE" {
+				if deviceStr, ok := defNumberVectorVal["attr_device"].(string); ok && !subscribedCCDs[deviceStr] {
+					_, err := p.indiConn.Write([]byte(fmt.Sprintf(enableBLOB, deviceStr)))
+					if err != nil {
+						log.Printf("could not write to INDI-server in solo-mode: %s\n", err)
 					}
+					subscribedCCDs[deviceStr] = true
+					break
 				}
 			}
 		}
