@@ -61,11 +61,13 @@ func NewAPIServer(token string, indiServerAddr string, phd2ServerAddr string, po
 		port:           port,
 		isTLS:          isTLS,
 		e:              echo.New(),
-		upgrader:       websocket.Upgrader{},
-		connList:       []net.Conn{},
-		indiProfile:    indiProfile,
-		currMode:       currMode,
-		agentModes:     agentModes,
+		upgrader: websocket.Upgrader{
+			EnableCompression: true,
+		},
+		connList:    []net.Conn{},
+		indiProfile: indiProfile,
+		currMode:    currMode,
+		agentModes:  agentModes,
 	}
 
 	if logutil.IsDev {
@@ -91,7 +93,9 @@ func NewAPIServer(token string, indiServerAddr string, phd2ServerAddr string, po
 		if err != nil {
 			return false
 		}
-		return allowedOrigins[host]
+
+		// check both host and host:port from --api-origins param values
+		return allowedOrigins[host] || allowedOrigins[u.Host]
 	}
 
 	return apiServer
