@@ -3,6 +3,7 @@ package solo
 import (
 	"context"
 	"log"
+	"time"
 
 	"github.com/indihub-space/agent/proto/indihub"
 )
@@ -58,6 +59,7 @@ func (s *Mode) Start() {
 func (s *Mode) Stop() {
 	s.status = "stopped"
 	s.stopCh <- struct{}{}
+	time.Sleep(3 * time.Second) // give some time to get and display solo-session summary
 }
 
 func (s *Mode) GetStatus() map[string]interface{} {
