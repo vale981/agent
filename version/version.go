@@ -10,9 +10,9 @@ var AgentVersion = "1.0.4"
 
 func CheckAgentVersion(latestVer string) {
 	log.Println("Current agent version:", AgentVersion)
-	log.Println("Latest agent version:", latestVer)
 
 	if AgentVersion < latestVer {
+		log.Println("Latest agent version:", latestVer)
 		yc := color.New(color.FgYellow)
 		yc.Println()
 		yc.Println("                                ************************************************************")

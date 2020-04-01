@@ -43,6 +43,7 @@ var (
 	flagAPIPort               uint64
 	flagAPIOrigins            string
 	flagMode                  string
+	flagLogFile               string
 
 	indiServerAddr string
 
@@ -123,10 +124,26 @@ robotic - equipment sharing is not possible, your equipment is controlled by IND
 		"",
 		"comma-separated list of origins allowed to connect to API-server",
 	)
+	flag.StringVar(
+		&flagLogFile,
+		"log-file",
+		"",
+		"path to log file (STDOUT by default)",
+	)
 }
 
 func main() {
 	flag.Parse()
+
+	if flagLogFile != "" {
+		// redirect log output to file
+		logFile, err := os.OpenFile(flagLogFile, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0666)
+		if err != nil {
+			log.Fatalf("error opening log file '%s': %s\n", flagLogFile, err)
+		}
+		defer logFile.Close()
+		log.SetOutput(logFile)
+	}
 
 	if flagMode != lib.ModeSolo && flagMode != lib.ModeShare && flagMode != lib.ModeRobotic {
 		log.Fatalf("Unknown mode '%s' provided\n", flagMode)
