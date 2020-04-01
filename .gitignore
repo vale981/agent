@@ -1,4 +1,5 @@
 .idea
 .indihub-agent
 indihub.json
+*.log
 bin/
