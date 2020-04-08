@@ -3,6 +3,7 @@ package solo
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"sync"
@@ -14,10 +15,12 @@ import (
 	"github.com/indihub-space/agent/proto/indihub"
 )
 
+const queueSize = 4096
+
 var (
 	getProperties    = []byte("<getProperties version='1.7'/>")
 	getCCDProperties = "<getProperties device='%s' version='1.7'/>"
-	enableBLOBNever  = "<enableBLOB device='%s'>Also</enableBLOB>"
+	enableBLOBNever  = "<enableBLOB device='%s'>Never</enableBLOB>"
 	enableBLOBOnly   = "<enableBLOB device='%s'>Only</enableBLOB>"
 
 	setBLOBVector   = []byte("<setBLOBVector")
@@ -40,6 +43,8 @@ type Agent struct {
 
 	sessionID    uint64
 	sessionToken string
+
+	respPool *sync.Pool
 }
 
 func New(indiServerAddr string, tunnel INDIHubSoloTunnel) *Agent {
@@ -47,6 +52,13 @@ func New(indiServerAddr string, tunnel INDIHubSoloTunnel) *Agent {
 		indiServerAddr: indiServerAddr,
 		tunnel:         tunnel,
 		ccdConnMap:     make(map[string]net.Conn),
+		respPool: &sync.Pool{
+			New: func() interface{} {
+				return &indihub.Response{
+					Data: make([]byte, lib.INDIServerMaxRecvMsgSize),
+				}
+			},
+		},
 	}
 }
 
@@ -56,21 +68,20 @@ func (p *Agent) Start(sessionID uint64, sessionToken string) error {
 
 	// open connection to real INDI-server
 	var err error
-	p.indiConn, err = net.Dial("tcp", p.indiServerAddr)
+	p.indiConn, err = p.connectToINDI()
 	if err != nil {
 		log.Printf("could not connect to INDI-server in solo-mode: %s\n", err)
 		return err
 	}
 	defer p.indiConn.Close()
 
-	// set connection to receive data
-	if _, err := p.indiConn.Write(getProperties); err != nil {
-		log.Printf("could not write to INDI-server in solo-mode: %s\n", err)
-		return err
-	}
+	// run response sending queue
+	respCh := make(chan *indihub.Response, queueSize)
+	defer close(respCh)
+	go p.sendResponses(respCh)
 
 	// listen INDI-server for data
-	buf := make([]byte, lib.INDIServerMaxSendMsgSize, lib.INDIServerMaxSendMsgSize)
+	buf := make([]byte, lib.INDIServerMaxSendMsgSize)
 	xmlFlattener := lib.NewXmlFlattener()
 	wg := sync.WaitGroup{}
 	var connNum uint32
@@ -80,6 +91,15 @@ func (p *Agent) Start(sessionID uint64, sessionToken string) error {
 		}
 
 		n, err := p.indiConn.Read(buf)
+		if err == io.EOF {
+			// reconnect
+			if p.indiConn, err = p.connectToINDI(); err != nil {
+				log.Printf("Failed to re-connect to INDI-server is solo mode: %s", err)
+				break
+			} else {
+				n, err = p.indiConn.Read(buf)
+			}
+		}
 		if err != nil {
 			log.Println("could not read from INDI-server in solo-mode:", err)
 			break
@@ -115,10 +135,10 @@ func (p *Agent) Start(sessionID uint64, sessionToken string) error {
 					// launch Go-routine with connection per CCD and only BLOB enabled
 					connNum++
 					wg.Add(1)
-					go func(ccdName string, cNum uint32) {
+					go func(ccdName string, cNum uint32, ch chan *indihub.Response) {
 						defer wg.Done()
-						p.readFromCCD(ccdName, cNum)
-					}(deviceStr, connNum)
+						p.readFromCCD(ccdName, cNum, ch)
+					}(deviceStr, connNum, respCh)
 				}
 			}
 		}
@@ -147,6 +167,45 @@ func (p *Agent) Start(sessionID uint64, sessionToken string) error {
 	return nil
 }
 
+func (p *Agent) connectToINDI() (net.Conn, error) {
+	log.Println("Connecting to INDI-server in solo mode...")
+	conn, err := net.Dial("tcp", p.indiServerAddr)
+	if err != nil {
+		log.Printf("could not connect to INDI-server in solo-mode: %s\n", err)
+		return nil, err
+	}
+
+	// set connection to receive data
+	if _, err := conn.Write(getProperties); err != nil {
+		log.Printf("could not write to INDI-server in solo-mode: %s\n", err)
+		conn.Close()
+		return nil, err
+	}
+
+	// disable BLOBs for CCDs if any
+	names := p.getCurrCCD()
+	for _, ccdName := range names {
+		if _, err := conn.Write([]byte(fmt.Sprintf(enableBLOBNever, ccdName))); err != nil {
+			log.Printf("could not write to INDI-server in solo-mode: %s\n", err)
+		}
+	}
+
+	log.Println("...OK")
+
+	return conn, nil
+}
+
+func (p *Agent) getCurrCCD() []string {
+	p.ccdConnMapMu.Lock()
+	defer p.ccdConnMapMu.Unlock()
+	names := []string{}
+	for ccdName := range p.ccdConnMap {
+		names = append(names, ccdName)
+	}
+
+	return names
+}
+
 func (p *Agent) getConnCCD(ccdName string) net.Conn {
 	p.ccdConnMapMu.Lock()
 	defer p.ccdConnMapMu.Unlock()
@@ -159,57 +218,84 @@ func (p *Agent) setConnCCD(ccdName string, conn net.Conn) {
 	p.ccdConnMap[ccdName] = conn
 }
 
-func (p *Agent) readFromCCD(ccdName string, cNum uint32) {
+func (p *Agent) readFromCCD(ccdName string, cNum uint32, ch chan *indihub.Response) {
 	// open connection
-	log.Println("Connecting to INDI-device:", ccdName)
-	conn, err := net.Dial("tcp", p.indiServerAddr)
+	conn, err := p.connectToCCD(ccdName)
 	if err != nil {
-		log.Printf("could not connect to INDI-server for CCD '%s' in solo-mode: %s\n",
-			ccdName, err)
 		return
 	}
 	defer conn.Close()
-	log.Println("...OK")
-
-	p.setConnCCD(ccdName, conn)
-
-	// set connection to receive data
-	if _, err := conn.Write([]byte(fmt.Sprintf(getCCDProperties, ccdName))); err != nil {
-		log.Printf("getProperties: could not write to INDI-server for %s in solo-mode: %s\n", ccdName, err)
-		return
-	}
-
-	// enable BLOBS only
-	if _, err := conn.Write([]byte(fmt.Sprintf(enableBLOBOnly, ccdName))); err != nil {
-		log.Printf("getProperties: could not write to INDI-server for %s in solo-mode: %s\n", ccdName, err)
-		return
-	}
 
 	// read data from INDI-server and send to tunnel
-	buf := make([]byte, lib.INDIServerMaxSendMsgSize, lib.INDIServerMaxSendMsgSize)
-	resp := &indihub.Response{
-		Conn:         cNum,
-		SessionID:    p.sessionID,
-		SessionToken: p.sessionToken,
-	}
+	buf := make([]byte, lib.INDIServerMaxSendMsgSize)
 	for {
 		if p.shouldExit {
 			break
 		}
 
 		n, err := conn.Read(buf)
+		if err == io.EOF {
+			// reconnect
+			if conn, err = p.connectToCCD(ccdName); err != nil {
+				log.Printf("Failed to re-connect to INDI-server for %s is solo mode: %s\n", ccdName, err)
+				break
+			} else {
+				n, err = conn.Read(buf)
+			}
+		}
 		if err != nil {
 			log.Printf("could not read from INDI-server for %s in solo-mode: %s\n", ccdName, err)
 			break
 		}
 
 		// send data to tunnel
-		resp.Data = buf[:n]
-		if err := p.tunnel.Send(resp); err != nil {
-			log.Printf("could not send to tunnel for %s in solo-mode: %s\n", ccdName, err)
-			break
-		}
+		resp := p.respPool.Get().(*indihub.Response)
+		resp.Conn = cNum
+		resp.SessionToken = p.sessionToken
+		resp.SessionID = p.sessionID
+		resp.Data = resp.Data[:n]
+		copy(resp.Data, buf[:n])
+		ch <- resp
 	}
+}
+
+func (p *Agent) sendResponses(respCh chan *indihub.Response) {
+	for resp := range respCh {
+		if err := p.tunnel.Send(resp); err != nil {
+			log.Printf("Failed to send a response to tunnel in solo-mode: %s", err)
+		}
+		p.respPool.Put(resp)
+	}
+}
+
+func (p *Agent) connectToCCD(ccdName string) (net.Conn, error) {
+	// open connection
+	log.Println("Connecting to INDI-device:", ccdName)
+	conn, err := net.Dial("tcp", p.indiServerAddr)
+	if err != nil {
+		log.Printf("could not connect to INDI-server for CCD '%s' in solo-mode: %s\n",
+			ccdName, err)
+		return nil, err
+	}
+	log.Println("...OK")
+
+	// set connection to receive data
+	if _, err := conn.Write([]byte(fmt.Sprintf(getCCDProperties, ccdName))); err != nil {
+		log.Printf("getProperties: could not write to INDI-server for %s in solo-mode: %s\n", ccdName, err)
+		conn.Close()
+		return nil, err
+	}
+
+	// enable BLOBS only
+	if _, err := conn.Write([]byte(fmt.Sprintf(enableBLOBOnly, ccdName))); err != nil {
+		log.Printf("getProperties: could not write to INDI-server for %s in solo-mode: %s\n", ccdName, err)
+		conn.Close()
+		return nil, err
+	}
+
+	p.setConnCCD(ccdName, conn)
+
+	return conn, nil
 }
 
 func (p *Agent) Close() {
